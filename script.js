@@ -1,8 +1,3 @@
-import {
-  HandLandmarker,
-  FilesetResolver
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
-
 "use strict";
 
 // ---------------------------------------------------------------
@@ -69,6 +64,17 @@ const rampRange = document.getElementById('rampRange');
 let snapToScale = true;
 let currentWave = 'sine';
 let running = false;
+let audioMode = 'none';
+let audioContext = null;
+let osc = null;
+let filter = null;
+let gain = null;
+let lastSeenAt = 0;
+let smoothed = null;
+let handLandmarker = null;
+let rafId = null;
+let lastVideoTime = -1;
+let fallbackPointer = { x: 0.5, y: 0.5, active: false };
 
 scaleToggle.addEventListener('click', () => {
   snapToScale = !snapToScale;
@@ -104,7 +110,6 @@ rampRange.addEventListener('input', e => {
 // ---------------------------------------------------------------
 const steps = {};
 function logStep(key, label, state, detail){
-  // state: 'pending' | 'ok' | 'fail'
   steps[key] = { label, state, detail };
   statusLog.classList.add('show');
   statusLog.innerHTML = Object.values(steps).map(s => {
@@ -115,53 +120,86 @@ function logStep(key, label, state, detail){
 }
 
 // ---------------------------------------------------------------
-// Audio chain (built after user gesture unlocks the AudioContext)
+// Audio chain
 // ---------------------------------------------------------------
-let osc, filter, gain, lastSeenAt = 0, smoothed = null;
-function buildAudioChain(){
-  osc = new Tone.Oscillator({ frequency: FREQ_MIN, type: currentWave }).start();
-  filter = new Tone.Filter({ frequency: FILTER_MAX, type: 'lowpass', Q: 0.8, rolloff: -12 });
-  gain = new Tone.Gain(0);
+async function buildAudioChain(){
+  if(typeof Tone !== 'undefined' && Tone && Tone.Oscillator){
+    audioMode = 'tone';
+    osc = new Tone.Oscillator({ frequency: FREQ_MIN, type: currentWave }).start();
+    filter = new Tone.Filter({ frequency: FILTER_MAX, type: 'lowpass', Q: 0.8, rolloff: -12 });
+    gain = new Tone.Gain(0);
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.toDestination();
+    return;
+  }
+
+  audioMode = 'web-audio';
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if(!AudioContextClass){ throw new Error('This browser does not support Web Audio.'); }
+
+  audioContext = new AudioContextClass();
+  if(audioContext.state === 'suspended') await audioContext.resume();
+
+  osc = audioContext.createOscillator();
+  filter = audioContext.createBiquadFilter();
+  gain = audioContext.createGain();
+  osc.type = currentWave;
+  osc.frequency.value = FREQ_MIN;
+  filter.type = 'lowpass';
+  filter.frequency.value = FILTER_MAX;
+  gain.gain.value = 0;
   osc.connect(filter);
   filter.connect(gain);
-  gain.toDestination();
+  gain.connect(audioContext.destination);
+  osc.start();
 }
 
 function stopAudioChain(){
   try{
-    if(osc){ osc.stop(); osc.disconnect(); osc.dispose && osc.dispose(); osc = null; }
-    if(filter){ filter.disconnect(); filter.dispose && filter.dispose(); filter = null; }
-    if(gain){ gain.disconnect(); gain.dispose && gain.dispose(); gain = null; }
-    Tone.context && Tone.context.close && Tone.context.close();
+    if(audioMode === 'tone'){
+      if(osc){ osc.stop(); osc.disconnect(); osc.dispose && osc.dispose(); osc = null; }
+      if(filter){ filter.disconnect(); filter.dispose && filter.dispose(); filter = null; }
+      if(gain){ gain.disconnect(); gain.dispose && gain.dispose(); gain = null; }
+      Tone && Tone.context && Tone.context.close && Tone.context.close();
+    } else {
+      if(osc){ try { osc.stop(); } catch(e){} osc.disconnect(); osc = null; }
+      if(filter){ filter.disconnect(); filter = null; }
+      if(gain){ gain.disconnect(); gain = null; }
+      audioContext = null;
+    }
   }catch(e){ console.warn('stopAudioChain', e); }
 }
 
 // ---------------------------------------------------------------
-// Hand tracking (MediaPipe Tasks Vision — HandLandmarker)
+// Hand tracking / input fallback
 // ---------------------------------------------------------------
-let handLandmarker = null;
-let rafId = null;
-let lastVideoTime = -1;
-
 async function createLandmarker(){
-  const vision = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm"
-  );
-  const modelUrl = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
-
   try{
-    return await HandLandmarker.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: modelUrl, delegate: "GPU" },
-      runningMode: "VIDEO",
-      numHands: 1
-    });
-  } catch(gpuErr){
-    logStep('model', 'Loading hand-tracking model', 'pending', 'GPU delegate failed, retrying on CPU…');
-    return await HandLandmarker.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: modelUrl, delegate: "CPU" },
-      runningMode: "VIDEO",
-      numHands: 1
-    });
+    const visionModule = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs');
+    const { HandLandmarker, FilesetResolver } = visionModule;
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm'
+    );
+    const modelUrl = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+    try{
+      return await HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: modelUrl, delegate: 'GPU' },
+        runningMode: 'VIDEO',
+        numHands: 1
+      });
+    } catch(gpuErr){
+      logStep('model', 'Loading hand-tracking model', 'pending', 'GPU delegate failed, retrying on CPU…');
+      return await HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: modelUrl, delegate: 'CPU' },
+        runningMode: 'VIDEO',
+        numHands: 1
+      });
+    }
+  } catch(err){
+    console.warn('MediaPipe unavailable, using pointer fallback', err);
+    return null;
   }
 }
 
@@ -189,6 +227,37 @@ function drawSkeleton(landmarks){
   }
 }
 
+function updateGesture(raw){
+  if(!smoothed) smoothed = { ...raw };
+  smoothed.y = lerp(smoothed.y, raw.y, SMOOTHING);
+  smoothed.open = lerp(smoothed.open, raw.open, SMOOTHING);
+  smoothed.x = lerp(smoothed.x, raw.x, SMOOTHING);
+
+  let targetFreq = FREQ_MIN * Math.pow(FREQ_MAX/FREQ_MIN, smoothed.y);
+  if(snapToScale) targetFreq = nearestScaleFreq(targetFreq);
+  const targetGain = smoothed.open * 0.85;
+  const targetFilter = FILTER_MIN * Math.pow(FILTER_MAX/FILTER_MIN, smoothed.x);
+
+  if(osc && filter && gain){
+    if(audioMode === 'tone'){
+      osc.frequency.rampTo(targetFreq, RAMP_TIME);
+      filter.frequency.rampTo(targetFilter, RAMP_TIME);
+      gain.gain.rampTo(targetGain, RAMP_TIME);
+    } else {
+      osc.frequency.setTargetAtTime(targetFreq, audioContext.currentTime, Math.max(RAMP_TIME, 0.01));
+      filter.frequency.setTargetAtTime(targetFilter, audioContext.currentTime, Math.max(RAMP_TIME, 0.01));
+      gain.gain.setTargetAtTime(targetGain, audioContext.currentTime, Math.max(RAMP_TIME, 0.01));
+    }
+  }
+
+  pitchValue.textContent = Math.round(targetFreq) + ' Hz';
+  pitchMeter.style.width = (smoothed.y*100).toFixed(0) + '%';
+  volValue.textContent = Math.round(targetGain/0.85*100) + '%';
+  volMeter.style.width = (targetGain/0.85*100).toFixed(0) + '%';
+  toneValue.textContent = Math.round(targetFilter) + ' Hz';
+  toneMeter.style.width = (smoothed.x*100).toFixed(0) + '%';
+}
+
 function processLandmarks(lm){
   const W = video.videoWidth || 960, H = video.videoHeight || 540;
   const wrist = lm[0], palm = lm[9], thumbTip = lm[4], indexTip = lm[8];
@@ -205,53 +274,65 @@ function processLandmarks(lm){
   const yNorm = clamp((palm.y - 0.08) / (0.92 - 0.08), 0, 1);
   const xNorm = clamp(palm.x, 0, 1);
 
-  const raw = { y: 1 - yNorm, open: openness, x: xNorm };
-  if(!smoothed) smoothed = { ...raw };
-  smoothed.y = lerp(smoothed.y, raw.y, SMOOTHING);
-  smoothed.open = lerp(smoothed.open, raw.open, SMOOTHING);
-  smoothed.x = lerp(smoothed.x, raw.x, SMOOTHING);
-
-  let targetFreq = FREQ_MIN * Math.pow(FREQ_MAX/FREQ_MIN, smoothed.y);
-  if(snapToScale) targetFreq = nearestScaleFreq(targetFreq);
-  const targetGain = smoothed.open * 0.85;
-  const targetFilter = FILTER_MIN * Math.pow(FILTER_MAX/FILTER_MIN, smoothed.x);
-
-  if(osc && filter && gain){
-    osc.frequency.rampTo(targetFreq, RAMP_TIME);
-    filter.frequency.rampTo(targetFilter, RAMP_TIME);
-    gain.gain.rampTo(targetGain, RAMP_TIME);
-  }
-
-  pitchValue.textContent = Math.round(targetFreq) + ' Hz';
-  pitchMeter.style.width = (smoothed.y*100).toFixed(0) + '%';
-  volValue.textContent = Math.round(targetGain/0.85*100) + '%';
-  volMeter.style.width = (targetGain/0.85*100).toFixed(0) + '%';
-  toneValue.textContent = Math.round(targetFilter) + ' Hz';
-  toneMeter.style.width = (smoothed.x*100).toFixed(0) + '%';
+  updateGesture({ y: 1 - yNorm, open: openness, x: xNorm });
 }
+
+function updatePointerPosition(event){
+  const rect = video.getBoundingClientRect();
+  if(!rect || rect.width === 0 || rect.height === 0) return;
+  fallbackPointer = {
+    x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+    y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+    active: true
+  };
+}
+
+window.addEventListener('pointermove', (event) => {
+  updatePointerPosition(event);
+});
+window.addEventListener('pointerdown', (event) => {
+  updatePointerPosition(event);
+});
+window.addEventListener('pointerup', () => {
+  fallbackPointer.active = false;
+});
+window.addEventListener('pointerleave', () => {
+  fallbackPointer.active = false;
+});
 
 function renderLoop(){
   rafId = requestAnimationFrame(renderLoop);
-  if(!handLandmarker || video.readyState < 2) return;
-  if(video.currentTime === lastVideoTime) return;
-  lastVideoTime = video.currentTime;
-
-  const results = handLandmarker.detectForVideo(video, performance.now());
   resizeCanvas();
   octx.clearRect(0, 0, overlay.width, overlay.height);
 
-  const hasHand = results.landmarks && results.landmarks.length > 0;
-  if(hasHand){
+  if(handLandmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime){
+    lastVideoTime = video.currentTime;
+    const results = handLandmarker.detectForVideo(video, performance.now());
+    const hasHand = results.landmarks && results.landmarks.length > 0;
+    if(hasHand){
+      lastSeenAt = performance.now();
+      handDot.classList.add('live');
+      handText.textContent = 'tracking';
+      drawSkeleton(results.landmarks[0]);
+      processLandmarks(results.landmarks[0]);
+      return;
+    }
+  }
+
+  if(fallbackPointer.active){
     lastSeenAt = performance.now();
     handDot.classList.add('live');
-    handText.textContent = 'tracking';
-    drawSkeleton(results.landmarks[0]);
-    processLandmarks(results.landmarks[0]);
+    handText.textContent = 'pointer';
+    updateGesture({ y: 1 - fallbackPointer.y, open: 0.8, x: fallbackPointer.x });
   } else {
     handDot.classList.remove('live');
     handText.textContent = 'no hand';
     if(gain && performance.now() - lastSeenAt > HAND_LOST_TIMEOUT){
-      gain.gain.rampTo(0, RAMP_TIME*2);
+      if(audioMode === 'tone'){
+        gain.gain.rampTo(0, RAMP_TIME*2);
+      } else {
+        gain.gain.setTargetAtTime(0, audioContext.currentTime, Math.max(RAMP_TIME*2, 0.01));
+      }
       volValue.textContent = '0%';
       volMeter.style.width = '0%';
     }
@@ -259,6 +340,10 @@ function renderLoop(){
 }
 
 async function startCamera(){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    throw new Error('Camera access is not available in this browser.');
+  }
+
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { width: { ideal: 960 }, height: { ideal: 540 }, facingMode: 'user' },
     audio: false
@@ -286,7 +371,6 @@ function stopCamera(){
 // ---------------------------------------------------------------
 startBtn.addEventListener('click', async () => {
   if(running){
-    // stop
     running = false;
     startBtn.textContent = 'Enable Camera & Sound';
     startOverlay.classList.remove('hidden');
@@ -301,27 +385,29 @@ startBtn.addEventListener('click', async () => {
   startBtn.textContent = 'Starting…';
   errorBox.classList.remove('show');
 
-  if(typeof Tone === 'undefined'){
-    logStep('audio', 'Loading synthesis engine (Tone.js)', 'fail', 'script failed to load — check your internet connection / ad-blocker');
-    failStart('Tone.js did not load. If you\'re offline or an ad-blocker/firewall is blocking cdn.jsdelivr.net, this app can\'t reach it.');
-    return;
-  }
-
   try{
     logStep('audio', 'Starting audio engine', 'pending');
-    await Tone.start();
-    buildAudioChain();
+    await buildAudioChain();
     logStep('audio', 'Starting audio engine', 'ok');
 
     running = true;
 
     logStep('model', 'Loading hand-tracking model', 'pending');
     handLandmarker = await createLandmarker();
-    logStep('model', 'Loading hand-tracking model', 'ok');
+    if(handLandmarker){
+      logStep('model', 'Loading hand-tracking model', 'ok');
+    } else {
+      logStep('model', 'Loading hand-tracking model', 'ok', 'using pointer fallback');
+    }
 
     logStep('camera', 'Requesting camera access', 'pending');
-    await startCamera();
-    logStep('camera', 'Requesting camera access', 'ok');
+    try{
+      await startCamera();
+      logStep('camera', 'Requesting camera access', 'ok');
+    } catch(err){
+      console.warn('Camera unavailable, continuing with pointer mode', err);
+      logStep('camera', 'Requesting camera access', 'ok', 'camera unavailable, pointer mode enabled');
+    }
 
     resizeCanvas();
     renderLoop();
@@ -344,7 +430,6 @@ window.addEventListener('keydown', (e) => {
   } else if(e.key === 's' || e.key === 'S'){
     scaleToggle.click();
   } else if(e.key === 'w' || e.key === 'W'){
-    // cycle
     const waves = ['sine','triangle','sawtooth','square'];
     let idx = waves.indexOf(currentWave);
     idx = (idx + 1) % waves.length;
