@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aerophone — Gesture Theremin</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="portrait-warning">
+  <div class="rotate-icon" aria-hidden="true">⟲</div>
+  <h1 style="margin-bottom:6px;">Rotate your device</h1>
+  <p style="color:var(--cream-dim); font-size:14px; max-width:320px;">
+    This instrument needs a wide, landscape view so the camera has room to see your whole hand.
+  </p>
+</div>
+
+<div class="overlay" id="startOverlay">
+  <div class="eyebrow">Gesture Instrument</div>
+  <h1>Aerophone</h1>
+  <p>
+    A theremin you play with one hand in the air. Raise your hand toward the camera —
+    height sets pitch, how wide your fingers spread sets volume, and side‑to‑side sets tone color.
+    This needs your camera and audio enabled.
+  </p>
+  <button class="start-btn" id="startBtn">Enable Camera &amp; Sound</button>
+  <div class="error-box" id="errorBox"></div>
+  <div class="status-log" id="statusLog"></div>
+</div>
+
+<div class="app">
+  <div class="eyebrow">Gesture Instrument</div>
+  <h1>Aerophone</h1>
+
+  <div class="instrument">
+    <div class="screws"><span class="screw tl"></span><span class="screw tr"></span><span class="screw bl"></span><span class="screw br"></span></div>
+
+    <div class="scope-wrap">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay" class="overlay-canvas"></canvas>
+      <div class="scanlines"></div>
+      <div class="scope-vignette scope-glow"></div>
+      <div class="corner-bracket tl"></div>
+      <div class="corner-bracket tr"></div>
+      <div class="corner-bracket bl"></div>
+      <div class="corner-bracket br"></div>
+      <div class="scope-label">Tracking Window</div>
+      <div class="hand-status"><span class="hand-dot" id="handDot"></span><span id="handText">no hand</span></div>
+    </div>
+
+    <div class="readouts">
+      <div class="readout">
+        <div class="readout-label">Pitch</div>
+        <div class="readout-value" id="pitchValue">— Hz</div>
+        <div class="meter"><div class="meter-fill" id="pitchMeter"></div></div>
+      </div>
+      <div class="readout">
+        <div class="readout-label">Volume</div>
+        <div class="readout-value teal" id="volValue">0%</div>
+        <div class="meter"><div class="meter-fill teal" id="volMeter"></div></div>
+      </div>
+      <div class="readout">
+        <div class="readout-label">Tone Color</div>
+        <div class="readout-value" id="toneValue">— Hz</div>
+        <div class="meter"><div class="meter-fill" id="toneMeter"></div></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="wave-select" role="group" aria-label="Waveform">
+        <button class="wave-btn active" data-wave="sine">Sine</button>
+        <button class="wave-btn" data-wave="triangle">Triangle</button>
+        <button class="wave-btn" data-wave="sawtooth">Saw</button>
+        <button class="wave-btn" data-wave="square">Square</button>
+      </div>
+      <div class="toggle-row">
+        <button class="toggle on" id="scaleToggle">Snap to scale: On</button>
+      </div>
+
+      <div id="settingsPanel" style="display:flex; gap:10px; align-items:center;">
+        <label style="font-size:12px; color:var(--cream-dim);">Smooth
+          <input id="smoothingRange" type="range" min="0" max="1" step="0.01" value="0.35" style="vertical-align:middle; margin-left:8px;">
+        </label>
+        <label style="font-size:12px; color:var(--cream-dim);">Ramp
+          <input id="rampRange" type="range" min="0" max="0.5" step="0.01" value="0.06" style="vertical-align:middle; margin-left:8px;">
+        </label>
+      </div>
+    </div>
+
+    <div class="hint">
+      <b>Height</b> of your hand sets pitch (higher = higher note) · <b>spread your thumb and index finger</b> apart to raise volume,
+      pinch them together to go quiet · <b>move left/right</b> to brighten or darken the tone.
+      Keep one hand clearly in frame — sound fades out when no hand is seen.
+    </div>
+  </div>
+</div>
+
+<!-- Tone.js — Web Audio synthesis (UMD build, exposes window.Tone) -->
+<script src="https://cdn.jsdelivr.net/npm/tone@15.1.22/build/Tone.js"></script>
+<script type="module" src="script.js"></script>
+
+</body>
+</html>
