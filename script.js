@@ -44,6 +44,8 @@ function lerp(a,b,t){ return a + (b-a)*t; }
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const octx = overlay.getContext('2d');
+const captureCanvas = document.createElement('canvas');
+const captureCtx = captureCanvas.getContext('2d');
 const startOverlay = document.getElementById('startOverlay');
 const startBtn = document.getElementById('startBtn');
 const errorBox = document.getElementById('errorBox');
@@ -57,6 +59,11 @@ const volMeter = document.getElementById('volMeter');
 const toneValue = document.getElementById('toneValue');
 const toneMeter = document.getElementById('toneMeter');
 const scaleToggle = document.getElementById('scaleToggle');
+const recordToggle = document.getElementById('recordToggle');
+const countdownOverlay = document.getElementById('countdownOverlay');
+const previewBox = document.getElementById('previewBox');
+const previewVideo = document.getElementById('previewVideo');
+const downloadRecordingBtn = document.getElementById('downloadRecordingBtn');
 const waveButtons = document.querySelectorAll('.wave-btn');
 const smoothingRange = document.getElementById('smoothingRange');
 const rampRange = document.getElementById('rampRange');
@@ -75,6 +82,14 @@ let handLandmarker = null;
 let rafId = null;
 let lastVideoTime = -1;
 let fallbackPointer = { x: 0.5, y: 0.5, active: false };
+let recorder = null;
+let recordingChunks = [];
+let recordingDestinationNode = null;
+let isRecording = false;
+let countdownTimer = null;
+let countdownValue = 0;
+let latestRecordingUrl = null;
+let latestRecordingName = null;
 
 scaleToggle.addEventListener('click', () => {
   snapToScale = !snapToScale;
@@ -206,8 +221,23 @@ async function createLandmarker(){
 function resizeCanvas(){
   overlay.width = overlay.clientWidth;
   overlay.height = overlay.clientHeight;
+  captureCanvas.width = video.videoWidth || overlay.clientWidth;
+  captureCanvas.height = video.videoHeight || overlay.clientHeight;
 }
 window.addEventListener('resize', resizeCanvas);
+
+function updateCaptureCanvas(){
+  if(!captureCtx) return;
+  const width = captureCanvas.width || overlay.clientWidth;
+  const height = captureCanvas.height || overlay.clientHeight;
+  if(!width || !height) return;
+  captureCtx.clearRect(0, 0, width, height);
+  captureCtx.save();
+  captureCtx.translate(width, 0);
+  captureCtx.scale(-1, 1);
+  captureCtx.drawImage(video, 0, 0, width, height);
+  captureCtx.restore();
+}
 
 function drawSkeleton(landmarks){
   octx.strokeStyle = 'rgba(255,140,66,0.85)';
@@ -300,10 +330,117 @@ window.addEventListener('pointerleave', () => {
   fallbackPointer.active = false;
 });
 
+function updateRecordingButton(){
+  recordToggle.disabled = !running;
+  recordToggle.classList.toggle('recording', isRecording);
+  recordToggle.textContent = isRecording ? 'Stop recording' : 'Record video';
+}
+
+function disconnectRecordingDestination(){
+  if(recordingDestinationNode && gain){
+    try{ gain.disconnect(recordingDestinationNode); }catch(e){ console.warn('disconnectRecordingDestination', e); }
+  }
+  recordingDestinationNode = null;
+}
+
+function showCountdown(seconds){
+  countdownValue = seconds;
+  countdownOverlay.textContent = String(seconds);
+  countdownOverlay.classList.add('show');
+  clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    countdownValue -= 1;
+    if(countdownValue > 0){
+      countdownOverlay.textContent = String(countdownValue);
+    } else {
+      countdownOverlay.classList.remove('show');
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+  }, 1000);
+}
+
+async function startRecording(){
+  if(!window.MediaRecorder || !captureCanvas.captureStream){
+    throw new Error('This browser does not support recording the camera stream.');
+  }
+  if(!video.srcObject && !video.captureStream){
+    throw new Error('No camera stream is available yet.');
+  }
+
+  showCountdown(3);
+  await new Promise(resolve => setTimeout(resolve, 3000));
+
+  resizeCanvas();
+  updateCaptureCanvas();
+  const stream = captureCanvas.captureStream(30);
+  if(!stream){
+    throw new Error('No camera stream is available yet.');
+  }
+
+  const audioContextToUse = (audioMode === 'tone' && Tone && Tone.context && Tone.context.rawContext)
+    ? Tone.context.rawContext
+    : audioContext;
+
+  if(!audioContextToUse && !gain){
+    throw new Error('Audio synthesis is not ready for recording.');
+  }
+
+  const mediaDestination = audioContextToUse ? audioContextToUse.createMediaStreamDestination() : null;
+  if(mediaDestination && gain){
+    try{ gain.connect(mediaDestination); }catch(e){ console.warn('recording connect failed', e); }
+    recordingDestinationNode = mediaDestination;
+  }
+
+  const tracks = [...stream.getVideoTracks()];
+  if(mediaDestination){
+    tracks.push(...mediaDestination.stream.getAudioTracks());
+  }
+
+  const combinedStream = new MediaStream(tracks);
+  const mimeType = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm'
+  ].find(type => MediaRecorder.isTypeSupported(type));
+
+  recorder = new MediaRecorder(combinedStream, mimeType ? { mimeType } : undefined);
+  recordingChunks = [];
+  recorder.ondataavailable = (event) => {
+    if(event.data && event.data.size > 0){ recordingChunks.push(event.data); }
+  };
+  recorder.onstop = () => {
+    const blob = new Blob(recordingChunks, { type: recorder.mimeType || 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    latestRecordingUrl = url;
+    latestRecordingName = `aerophone-${Date.now()}.webm`;
+    previewVideo.src = url;
+    previewVideo.load();
+    previewBox.hidden = false;
+    downloadRecordingBtn.disabled = false;
+    disconnectRecordingDestination();
+    isRecording = false;
+    updateRecordingButton();
+    logStep('record', 'Recording video', 'ok', 'Preview ready');
+  };
+
+  recorder.start();
+  isRecording = true;
+  updateRecordingButton();
+  logStep('record', 'Recording video', 'pending', 'Capturing camera and audio');
+}
+
+function stopRecording(){
+  if(recorder && recorder.state !== 'inactive'){
+    recorder.stop();
+  }
+}
+
 function renderLoop(){
   rafId = requestAnimationFrame(renderLoop);
   resizeCanvas();
   octx.clearRect(0, 0, overlay.width, overlay.height);
+  updateCaptureCanvas();
 
   if(handLandmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime){
     lastVideoTime = video.currentTime;
@@ -375,9 +512,12 @@ startBtn.addEventListener('click', async () => {
     startBtn.textContent = 'Enable Camera & Sound';
     startOverlay.classList.remove('hidden');
     if(rafId) cancelAnimationFrame(rafId);
+    if(isRecording){ stopRecording(); }
     stopCamera();
     stopAudioChain();
     if(handLandmarker && handLandmarker.close) handLandmarker.close();
+    isRecording = false;
+    updateRecordingButton();
     return;
   }
 
@@ -414,12 +554,37 @@ startBtn.addEventListener('click', async () => {
     startOverlay.classList.add('hidden');
     startBtn.textContent = 'Stop';
     startBtn.disabled = false;
+    updateRecordingButton();
   } catch(err){
     console.error(err);
     const key = !handLandmarker ? 'model' : 'camera';
     logStep(key, key === 'model' ? 'Loading hand-tracking model' : 'Requesting camera access', 'fail', err && err.message ? err.message : String(err));
     failStart(describeError(err));
   }
+});
+
+recordToggle.addEventListener('click', async () => {
+  if(!running){ return; }
+  if(isRecording){
+    stopRecording();
+  } else {
+    try{
+      await startRecording();
+    } catch(err){
+      console.error(err);
+      logStep('record', 'Recording video', 'fail', err && err.message ? err.message : String(err));
+    }
+  }
+});
+
+downloadRecordingBtn.addEventListener('click', () => {
+  if(!latestRecordingUrl){ return; }
+  const link = document.createElement('a');
+  link.href = latestRecordingUrl;
+  link.download = latestRecordingName || 'aerophone-recording.webm';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 });
 
 // keyboard shortcuts: space toggles start/stop, s toggles snap, w cycles waveform
